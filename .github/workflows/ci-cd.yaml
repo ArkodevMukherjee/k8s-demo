@@ -1,0 +1,90 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ---------- CI: test both services ----------
+  test-node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm install
+        working-directory: node-service
+      - run: npm test
+        working-directory: node-service
+
+  test-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements-dev.txt
+        working-directory: python-service
+      - run: pytest
+        working-directory: python-service
+
+  # ---------- Build & push images (main only) ----------
+  build-push:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test-node, test-python]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        service: [node-service, python-service]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lowercase repo name
+        run: echo "REPO=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.service }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.REPO }}/${{ matrix.service }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.REPO }}/${{ matrix.service }}:latest
+
+  # ---------- CD: deploy to Kubernetes ----------
+  deploy:
+    needs: build-push
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lowercase repo name
+        run: echo "REPO=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
+      - uses: azure/setup-kubectl@v4
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+      - name: Set image tags to this commit
+        working-directory: k8s
+        run: |
+          kustomize edit set image \
+            node-service=${REGISTRY}/${REPO}/node-service:${{ github.sha }} \
+            python-service=${REGISTRY}/${REPO}/python-service:${{ github.sha }}
+      - name: Apply manifests
+        run: kubectl apply -k k8s/
+      - name: Wait for rollout
+        run: |
+          kubectl -n demo rollout status deployment/python-service --timeout=120s
+          kubectl -n demo rollout status deployment/node-service --timeout=120s

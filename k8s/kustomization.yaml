@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - python-service.yaml
+  - node-service.yaml
+  - ingress.yaml
+# CI rewrites these with `kustomize edit set image`.
+# Defaults below are for local dev (see Makefile).
+images:
+  - name: node-service
+    newName: node-service
+    newTag: local
+  - name: python-service
+    newName: python-service
+    newTag: local
